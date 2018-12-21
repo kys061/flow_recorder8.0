@@ -3,28 +3,42 @@
 # Copyright (C) 2016 Saisei Networks Inc. All rights reserved.
 
 from saisei.saisei_api import saisei_api
-from pprint import pprint
 from SubnetTree import SubnetTree
-import time
-import csv
-import threading
-from threading import Thread
-import copy
+from logging.handlers import RotatingFileHandler
+from logging import StreamHandler
+import logging
+from threading import Thread, Timer
 from Queue import Queue
+from urlparse import urlparse, parse_qs
+import copy
+import time, sched
+import csv
+import os
+import sys
+import re
 
-USER = 'admin'
-PASSWORD = 'FlowCommand#1'
+
+USER = 'cli_admin'
+PASSWORD = 'cli_admin'
 SERVER = 'localhost'
 PORT = '5000'
 REST_BASIC_PATH ='configurations/running/'
 REST_FLOW_PATH = 'flows/'
+FLOW_CSV_FILENAME = '{}{}{}_{}_{}_flows.log' # year, mon, day, {with}, ip
+RECORDER_LOG_FILENAME = r'/var/log/flow_recorder8.0.log'
+FLOW_PATH = '/var/log/flows/'
 TOKEN = '1'
 ORDER = '<average_rate'
 START = '0'
-LIMIT = '1'
+LIMIT = '100000'
 WITH = 'with='  # with=dest_host=ipaddress
-WITH_ATTR = 'dest_host'
+WITH_ATTR = [
+'dest_host',
+'source_host',
+]
 OUTPUT_FILENAME = '/var/log/flow.log'
+
+logger_recorder = None
 
 
 INCLUDE = [
@@ -32,6 +46,8 @@ INCLUDE = [
 '103.194.111.5',
 '103.194.111.6',
 '103.194.111.7',
+'133.186.160.28',
+'133.186.160.29',
 ]
 
 FLOW_ATTR = [
@@ -71,101 +87,25 @@ FLOW_ATTR = [
 FIELD_NAMES = copy.deepcopy(FLOW_ATTR)
 FIELD_NAMES.insert(0, "timestamp")
 
-# FIELD_NAMES = [
-# 'timestamp',
-# 'name',
-# 'ingress_interface',
-# 'egress_interface',
-# 'source_host',
-# 'source_port',
-# 'dest_host',
-# 'dest_port',
-# 'application',
-# 'duration',
-# 'rate',
-# 'peer_rate',
-# 'byte_count',
-# 'peer_byte_count',
-# 'packet_count',
-# 'peer_packet_count',
-# 'packets_discarded',
-# 'peer_packets_discarded',
-# 'retransmissions',
-# 'peer_retransmissions',
-# 'round_trip_time',
-# 'udp_jitter',
-# 'timeouts',
-# 'rtt_server',
-# 'rtt_client',
-# 'red_threshold_discards',
-# 'server_name',
-# 'request_url',
-# 'in_control',
-# 'geolocation',
-# 'distress',
-# 'autonomous_system',
-# ]
 
-# FLOW_ATTR = [
-#     'name', 'dest_host', 'distress', 'drop_reason', 'ingress_interface', 'egress_interface', 'source_host', 'source_port', 'dest_port',
-#     'ip_protocol', 'application', 'duration', 'rate', 'peer_rate', 'packets_discarded', 'peer_packets_discarded',
-#     'retransmissions', 'peer_retransmissions', 'round_trip_time', 'geolocation', 'peer_flow', 'protocol', 'red_threshold_discards',
-#     'request_url', 'server_name', 'timeouts', 'udp_jitter', 'user', 'in_control', 'rtt_client', 'rtt_server', 'server_host', 'server_latency', 'description',
-#     'byte_count', 'peer_byte_count', 'packet_count', 'peer_packet_count','timeouts','rtt_client', 'rtt_server', 'autonomous_system'
-# ]
-# FLOW_ATTR = [
-#     'name', 'dest_host', 'distress', 'drop_reason', 'ingress_interface', 'egress_interface', 'source_host', 'source_port', 'dest_port',
-#    'ip_protocol', 'application', 'duration', 'rate', 'peer_rate', 'target_rate', 'average_rate',
-#     'packets_discarded', 'peer_packets_discarded', 'retransmissions', 'peer_retransmissions',
-#    'round_trip_time', 'autonomous_system', 'average_delay', 'delay', 'description', 'dest_mac', 'discarded_byte_count', 'dup_acks',
-#    'efc', 'external_route', 'flow_start_time', 'flow_type', 'future_rate', 'geolocation', 'goodput', 'highest_ack', 'highest_next_seqno',
-#     'highest_seqno', 'http_status', 'ingress_policy', 'interpacket_time', 'long_interpacket_gaps', 'next_seqno', 'peer_dup_acks',
-#     'peer_flow', 'protocol', 'rate_plan', 'red_threshold_discards', 'request_url', 'server_name', 'source_mac', 'tcp_flags',
-#     'udp_jitter', 'user', 'user_agent', 'app_detection_type', 'chargeable_byte_count', 'client_host', 'delay_factor',
-#     'diverted_packets', 'flow_flags', 'flow_state', 'groups', 'in_control', 'initial_seqno', 'last_direct_time',
-#     'last_forwarded_packet', 'last_packet_attempt', 'last_packet_due_time', 'max_packet_delay', 'min_target_rate',
-#     'orange_threshold_multiplier', 'parent_flow', 'policy_target_rate', 'port_application', 'red_threshold_multiplier',
-#     'refresh_count', 'retransmission_events',  'server_host', 'server_latency', 'description'
-# ]
-def get_flows(rest_flow_url):
-    api_start = time.time()
-    coll_flows = api.rest.get(rest_flow_url)['collection']
-    print(rest_flow_url)
-    print('api elapsed: {}'.format(time.time() - api_start))
-    pprint('collection count : {}'.format(len(coll_flows)))
-    for_start = time.time()
-    for flow in coll_flows:
-        del flow['_key_order']
-        del flow['link']
-        del flow['class']
-        # for key in flow:
-        #     print(key)
-        for key in flow:
-            if isinstance(flow[key], dict):
-                flow[key] = flow[key]['link']['name']
-            if flow[key] == '':
-                flow[key] = 'none'
-            # print(type(flow[key]))
-    print('for elapsed: {}'.format(time.time() - for_start))
-    return coll_flows
-
-
-def write_flows(coll_flows):
-    writer_start = time.time()
-    with open('/home/saisei/dev/flow_recorder8.0/test_api.txt', 'wb') as f:
-        writer = csv.DictWriter(f, fieldnames=FIELD_NAMES)
-        writer.writeheader()
-        for flow in coll_flows:
-            if str(flow['dest_host']) in include_subnet_tree:
-                writer.writerow(flow)
-            if str(flow['source_host']) in include_subnet_tree:
-                writer.writerow(flow)
-    print('writer elapsed: {}'.format(time.time() - writer_start))
-    print_line()
+def make_logger():
+    global logger_recorder
+    logger_recorder = logging.getLogger('saisei.flow.recorder')
+    #  ==== MUST be True for hg commit ====
+    if True:
+        fh = RotatingFileHandler(RECORDER_LOG_FILENAME, 'a', 50 * 1024 * 1024, 4)
+        logger_recorder.setLevel(logging.INFO)
+    else:
+        fh = StreamHandler(sys.stdout)
+        logger_recorder.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    logger_recorder.addHandler(fh)
+    logger_recorder.info("***** logger_recorder starting %s *****" % (sys.argv[0]))
 
 
 class ThreadRestApi(Thread):
-    """Threaded website reader"""
+    """Threaded Rest Call"""
     def __init__(self, queue, out_queue):
         Thread.__init__(self)
         self.queue = queue
@@ -173,51 +113,127 @@ class ThreadRestApi(Thread):
 
     def run(self):
         while True:
-            # Grabs host from queue
             rest_flow_url = self.queue.get()
-
-            # Grabs urls of hosts and then grabs chunk of webpage
             coll_flows = get_flows(rest_flow_url)
-            print (coll_flows)
-            # chunk = url.read()
-            # print "Reading: %s" % host
-
-            # Place chunk into out queue
             self.out_queue.put(coll_flows)
-
-            # Signals to queue job is done
             self.queue.task_done()
 
 
 class ThreadWriter(Thread):
-    """Threaded title parser"""
+    """Threaded Write Flows"""
     def __init__(self, out_queue):
         Thread.__init__(self)
         self.out_queue = out_queue
 
     def run(self):
         while True:
-            # Grabs it from queue
             coll_flows = self.out_queue.get()
-            # write flows
             write_flows(coll_flows)
-
-            # Signals to queue job is done
             self.out_queue.task_done()
 
 
+def make_flow_folder(year, mon, day):
+    try:
+        path_year = FLOW_PATH + year + '/'
+        path_mon = path_year + mon + '/'
+        path_day = path_mon + day + '/'
+    except Exception as e:
+        pass
+    else:
+        if not os.path.isdir(FLOW_PATH):
+            os.makedirs(FLOW_PATH)
+        if not os.path.isdir(path_year):
+            os.makedirs(path_year)
+        if not os.path.isdir(path_mon):
+            os.makedirs(path_mon)
+        if not os.path.isdir(path_day):
+            os.makedirs(path_day)
+        return path_day
+
+
+def get_rest_url(ip, flow_attrs, _with_attr):
+    return "{}{}?token={}&order={}&start={}&limit={}&select={}&with={}={}".format(
+        REST_BASIC_PATH, REST_FLOW_PATH, TOKEN, ORDER, START, LIMIT, flow_attrs, _with_attr, ip)
+
+def get_flows(rest_flow_url):
+    api_start = time.time()
+    try:
+        parsed_rest_url = urlparse(rest_flow_url)
+        coll_flows = api.rest.get(rest_flow_url)['collection']
+        parsed_qs = parse_qs(parsed_rest_url.query)
+        ip = parsed_qs['with'][0].split('=')[1]
+        # logger_recorder.info('api elapsed: {}'.format(time.time() - api_start))
+        logger_recorder.info('collection count of {0} : {1}, it takes {2:.2f} seconds'.format(ip, len(coll_flows), time.time() - api_start))
+        # for_start = time.time()
+    except Exception as e:
+        logger_recorder.error('get_flows: {}'.format(e))
+    else:
+        for flow in coll_flows:
+            del flow['_key_order']
+            del flow['link']
+            del flow['class']
+            # for key in flow:
+            #     logger_recorder.info(key)
+            for key in flow:
+                if isinstance(flow[key], dict):
+                    flow[key] = flow[key]['link']['name']
+                if flow[key] == '':
+                    flow[key] = 'none'
+                # logger_recorder.info(type(flow[key]))
+        # logger_recorder.info('for elapsed: {}'.format(time.time() - for_start))
+        return {
+            'coll_flows': coll_flows,
+            'parsed_qs': parse_qs(parsed_rest_url.query)
+        }
+
+
+def write_flows(coll_flows):
+    writer_start = time.time()
+    today = time.localtime()
+    path_day = make_flow_folder(str(today.tm_year), str(today.tm_mon), str(today.tm_mday))
+    try:
+        flows = coll_flows['coll_flows']
+        count_of_flows = len(flows)
+        parsed_qs = coll_flows['parsed_qs']
+        _with = parsed_qs['with'][0].split('=')[0]
+        ip = parsed_qs['with'][0].split('=')[1]
+        flow_csv_filepath = path_day + FLOW_CSV_FILENAME.format(today.tm_year, today.tm_mon, today.tm_mday, _with, ip)
+    except Exception as e:
+        logger_recorder.error('write_flows: {}'.format(e))
+        pass
+    else:
+        if not (os.path.isfile(flow_csv_filepath)):
+            with open(flow_csv_filepath, 'w') as f:
+                writer = csv.DictWriter(f, fieldnames=FIELD_NAMES)
+                writer.writeheader()
+                for flow in flows:
+                    if str(flow[_with]) in include_subnet_tree:
+                        writer.writerow(flow)
+                    # if str(flow['source_host']) in include_subnet_tree:
+                    #     writer.writerow(flow)
+            logger_recorder.info('{0} Flows are updated to {1}, it takes {2:.2f} seconds'.format(
+                count_of_flows, flow_csv_filepath, time.time() - writer_start))
+            print_line()
+        else:
+            with open(flow_csv_filepath, 'a') as f:
+                writer = csv.DictWriter(f, fieldnames=FIELD_NAMES)
+                for flow in flows:
+                    if str(flow[_with]) in include_subnet_tree:
+                        writer.writerow(flow)
+                    # if str(flow['source_host']) in include_subnet_tree:
+                    #     writer.writerow(flow)
+            logger_recorder.info('{0} Flows are updated to {1}, it takes {2:.2f} seconds'.format(
+                count_of_flows, flow_csv_filepath, time.time() - writer_start))
+            # logger_recorder.info('writer elapsed: {}'.format(time.time() - writer_start))
+            # print_line()
+        # sleep_start = time.time()
+        # time.sleep(10)
+        # logger_recorder.info('writer sleep elapsed: {}'.format(time.time() - sleep_start))
+        # print_line()
+
+
 def print_line():
-    print('==========================')
-
-
-def wrapper_targetFunc(f, q, somearg):
-    while True:
-        try:
-            work = q.get(timeout=3)  # or whatever
-        except Queue.Empty:
-            return
-        f(work, somearg)
-        q.task_done()
+    logger_recorder.info('==========================')
 
 
 def get_and_wirte_flows():
@@ -228,24 +244,24 @@ def get_and_wirte_flows():
         rest_flow_url = "{}{}?token={}&order={}&start={}&limit={}&select={}&with={}={}".format(
             REST_BASIC_PATH, REST_FLOW_PATH, TOKEN, ORDER, START, LIMIT, flow_attrs, WITH_ATTR, ip)
         coll_flows = api.rest.get(rest_flow_url)['collection']
-        print('api elapsed: {}'.format(time.time() - api_start))
-        pprint('collection count : {}'.format(len(coll_flows)))
+        logger_recorder.info('api elapsed: {}'.format(time.time() - api_start))
+        logger_recorder.info('collection count : {}'.format(len(coll_flows)))
         for_start = time.time()
         for flow in coll_flows:
             del flow['_key_order']
             del flow['link']
             del flow['class']
             # for key in flow:
-            #     print(key)
+            #     logger_recorder.info(key)
             for key in flow:
                 if isinstance(flow[key], dict):
                     flow[key] = flow[key]['link']['name']
                 if flow[key] == '':
                     flow[key] = 'none'
-                # print(type(flow[key]))
-        print('for elapsed: {}'.format(time.time() - for_start))
+                # logger_recorder.info(type(flow[key]))
+        logger_recorder.info('for elapsed: {}'.format(time.time() - for_start))
         writer_start = time.time()
-        with open('/home/saisei/dev/flow_recorder8.0/test_api.txt', 'wb') as f:
+        with open('/home/saisei/dev/flow_recorder8.0/test_api.txt', 'a') as f:
             writer = csv.DictWriter(f, fieldnames=FIELD_NAMES)
             writer.writeheader()
             for flow in coll_flows:
@@ -253,88 +269,83 @@ def get_and_wirte_flows():
                     writer.writerow(flow)
                 if str(flow['source_host']) in include_subnet_tree:
                     writer.writerow(flow)
-        print('writer elapsed: {}'.format(time.time() - writer_start))
+        logger_recorder.info('writer elapsed: {}'.format(time.time() - writer_start))
         print_line()
 
+try:
+    if re.search('flow_recorder.py', sys.argv[0]):
+        make_logger()
+except Exception as e:
+    pass
 
-# pprint(coll_flows)
 
-# queue = Queue.Queue()
-
-
-# class ThreadRecorder(threading.Thread):
-#     def __init__(self, queue):
-#         threading.Thread.__init__(self)
-#         self.queue = queue
-#
-#         def run(self):
-#             types = self.queue.get()
-#             fr = types[0]
-#             fr.start(types[1], types[2])
-#             self.queue.task_done()
-
-# make subnet tree for INCLUDE
 try:
     include_subnet_tree = SubnetTree()
     for subnet in INCLUDE:
         include_subnet_tree[subnet] = str(subnet)
 except Exception as e:
+    logger_recorder.error('subnetTree: {}'.format(e))
     pass
 
-# make api
+
 try:
     api = saisei_api(server=SERVER, port=PORT, user=USER, password=PASSWORD)
 except Exception as e:
+    logger_recorder.error('api: {}'.format(e))
     pass
 
 
-
 def main():
-    queue = Queue()
-    out_queue = Queue()
+    try:
+        queue = Queue()
+        out_queue = Queue()
+        flow_attrs = ','.join([str(attr) for attr in FLOW_ATTR])
+    except Exception as e:
+        logger_recorder.error('queue: {}'.format(e))
+        sys.exit()
+    else:
+        while True:
+            for i in range(len(INCLUDE)):
+                tra = ThreadRestApi(queue, out_queue)
+                tra.daemon = True
+                tra.start()
 
-    flow_attrs = ','.join([str(attr) for attr in FLOW_ATTR])
+            logger_recorder.info('Getting Started Collecting...')
+            for idx, ip in enumerate(INCLUDE):
+                logger_recorder.info('{} : {}'.format(idx, ip))
+                for _with_attr in WITH_ATTR:
+                    rest_flow_url = get_rest_url(ip, flow_attrs, _with_attr)
+                    queue.put(rest_flow_url)
+            print_line()
 
-    while True:
-        # Spawn a pool of threads, and pass them queue instance
-        for i in range(len(INCLUDE)):
-            tra = ThreadRestApi(queue, out_queue)
-            tra.daemon = True
-            tra.start()
+            for i in range(len(INCLUDE)):
+                tw = ThreadWriter(out_queue)
+                tw.daemon = True
+                tw.start()
 
-        # Populate queue with data
-        for ip in INCLUDE:
-            pprint('IP : {}'.format(ip))
-            rest_flow_url = "{}{}?token={}&order={}&start={}&limit={}&select={}&with={}={}".format(
-                REST_BASIC_PATH, REST_FLOW_PATH, TOKEN, ORDER, START, LIMIT, flow_attrs, WITH_ATTR, ip)
-            queue.put(rest_flow_url)
-        # Excute Write func
-        for i in range(len(INCLUDE)):
-            tw = ThreadWriter(out_queue)
-            tw.daemon = True
-            tw.start()
-
-        # Wait on the queue until everything has been processed
-        queue.join()
-        out_queue.join()
-        # threads = []
-        # t = threading.Thread(target=get_and_wirte_flows())
-        # threads.append(t)
-        # for t in threads:
-        #     t.start()
-        # for t in threads:
-        #     t.join()
-        sleep_start = time.time()
-        time.sleep(10)
-        print('sleep elapsed: {}'.format(time.time() - sleep_start))
-        print_line()
-
+            queue.join()
+            out_queue.join()
+            # threads = []
+            # t = threading.Thread(target=get_and_wirte_flows())
+            # threads.append(t)
+            # for t in threads:
+            #     t.start()
+            # for t in threads:
+            #     t.join()
+            sleep_start = time.time()
+            time.sleep(10)
+            logger_recorder.info('sleep elapsed: {0:.2f}'.format(time.time() - sleep_start))
+            print_line()
 
 if __name__ == "__main__":
-    main_start = time.time()
-    main()
-    print ("Main Elapsed Time: %s" % (time.time() - main_start))
-# pprint(coll_flows)
+    try:
+        main()
+    except KeyboardInterrupt:
+        print ("\r\nThe script is terminated by user interrupt!")
+        print ("Bye!!")
+        sys.exit()
+
+# plogger_recorder.info(coll_flows)
 
 # def type_checker(key, data):
 #     if isinstance(data, dict):
@@ -344,26 +355,3 @@ if __name__ == "__main__":
 #             return data
 #         else:
 #             return 'none'
-
-# &format=human&link=expand
-#  '&select=name%2Cdest_host%2Cdistress%2Cdrop_reason%2Cingress_interface%2Cegress_interface%2Csource_host%2Csource_port%2Cdest_port%2Cip_protocol%2Capplication%2Cduration%2Crate%2Cpeer_rate%2Ctarget_rate%2Caverage_rate%2Cbyte_count%2Cpeer_byte_count%2Cpacket_count%2Cpeer_packet_count%2Cpackets_discarded%2Cpeer_packets_discarded%2Cretransmissions%2Cpeer_retransmissions%2Cround_trip_time%2Cautonomous_system%2Caverage_delay%2Cdelay%2Cdescription%2Cdest_mac%2Cdiscarded_byte_count%2Cdup_acks%2Cefc%2Cexternal_route%2Cflow_start_time%2Cflow_type%2Cfuture_rate%2Cgeolocation%2Cgoodput%2Chighest_ack%2Chighest_next_seqno%2Chighest_seqno%2Chttp_status%2Cingress_policy%2Cinterpacket_time%2Clong_interpacket_gaps%2Cnext_seqno%2Cpeer_dup_acks%2Cpeer_flow%2Cprotocol%2Crate_plan%2Cred_threshold_discards%2Crequest_url%2Cserver_name%2Csource_mac%2Ctcp_flags%2Ctimeouts%2Cudp_jitter%2Cuser%2Cuser_agent%2Capp_detection_type%2Cchargeable_byte_count%2Cclient_host%2Cdelay_factor%2Cdiverted_packets%2Cflow_flags%2Cflow_state%2Cgroups%2Cin_control%2Cinitial_seqno%2Clast_direct_time%2Clast_forwarded_packet%2Clast_packet_attempt%2Clast_packet_due_time%2Cmax_packet_delay%2Cmin_target_rate%2Corange_threshold_multiplier%2Cparent_flow%2Cpolicy_target_rate%2Cport_application%2Cred_threshold_multiplier%2Crefresh_count%2Cretransmission_events%2Crtt_client%2Crtt_server%2Cserver_host%2Cserver_latency%2Cdescription'
-# flows = api.rest.get('configurations/running/flows')
-# api.rest.get('configurations/running')
-
-#
-# def wrapper_targetFunc(f, q, somearg):
-#     while True:
-#         try:
-#             work = q.get(timeout=3)  # or whatever
-#         except queue.Empty:
-#             return
-#         f(work, somearg)
-#         q.task_done()
-#
-# q = queue.Queue()
-# for ptf in b:
-#     q.put_nowait(ptf)
-# for _ in range(20):
-#     threading.Thread(target=wrapper_targetFunc,
-#                      args=(targetFunction, q, otherarg)).start()
-# q.join()
