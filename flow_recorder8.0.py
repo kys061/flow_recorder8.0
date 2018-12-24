@@ -7,81 +7,47 @@ from SubnetTree import SubnetTree
 from logging.handlers import RotatingFileHandler
 from logging import StreamHandler
 import logging
-from threading import Thread
+from threading import Thread, Timer
 from Queue import Queue
 from urlparse import urlparse, parse_qs
-from itertools import product
 import copy
-import time
+import time, sched
 import csv
 import os
 import sys
 import re
 
-## default connection info
+
 USER = 'cli_admin'
 PASSWORD = 'cli_admin'
 SERVER = 'localhost'
 PORT = '5000'
+REST_BASIC_PATH ='configurations/running/'
+REST_FLOW_PATH = 'flows/'
+FLOW_CSV_FILENAME = '{}{}{}_{}_{}_flows.log' # year, mon, day, {with}, ip
+RECORDER_LOG_FILENAME = r'/var/log/flow_recorder8.0.log'
+FLOW_PATH = '/var/log/flows/'
+TOKEN = '1'
+ORDER = '<average_rate'
+START = '0'
+LIMIT = '100000'
+WITH = 'with='  # with=dest_host=ipaddress
+WITH_ATTR = [
+'dest_host',
+'source_host',
+]
+OUTPUT_FILENAME = '/var/log/flow.log'
 
-## CUSTOM
-INCLUDE_IP = [
+logger_recorder = None
+
+
+INCLUDE = [
 '103.194.111.4',
 '103.194.111.5',
 '103.194.111.6',
 '103.194.111.7',
-]
-
-INCLUDE_PORT = [
-# '80',
-# '443',
-'19',
-'1900',
-'11211'
-]
-
-INCLUDE_APP = [
-    'https'
-]
-
-# it can use until 2 filters
-USE_PLURAL_FILTER = True
-WITH_OPERATION = [{
-    # single filter
-    'singular': [{
-        # 'dest_host': INCLUDE_IP,
-        # 'source_host': INCLUDE_IP,
-        'dest_port': INCLUDE_PORT,
-        'source_port': INCLUDE_PORT,
-    }],
-    # plural filter
-    'plural': [
-        [{
-            'dest_host': INCLUDE_IP,
-            'source_port': INCLUDE_PORT,
-            # 'application': INCLUDE_APP,
-        }],
-        [{
-            'source_host': INCLUDE_IP,
-            'dest_port': INCLUDE_PORT,
-        }]
-    ]
-}]
-
-REST_BASIC_PATH ='configurations/running/'
-REST_FLOW_PATH = 'flows/'
-FLOW_CSV_FILENAME = '{}{}{}_{}_flows.log' # year, mon, day, {with}, ip
-RECORDER_LOG_FILENAME = r'/var/log/flow_recorder8.0.log'
-FLOW_PATH = '/var/log/flows/'
-TOKEN = '1'
-ORDER = '<average_rate' # <: Descending, >: Ascending
-START = '0'
-LIMIT = '100000'
-WITH = 'with='
-
-WITH_ATTR = [
-'dest_host',
-'source_host',
+'133.186.160.28',
+'133.186.160.29',
 ]
 
 FLOW_ATTR = [
@@ -148,8 +114,6 @@ class ThreadRestApi(Thread):
     def run(self):
         while True:
             rest_flow_url = self.queue.get()
-            # print(rest_flow_url)
-            # print_line()
             coll_flows = get_flows(rest_flow_url)
             self.out_queue.put(coll_flows)
             self.queue.task_done()
@@ -187,50 +151,9 @@ def make_flow_folder(year, mon, day):
         return path_day
 
 
-def make_url(_single_attr_key_val, flow_attrs, _with_attr, *args, **kwargs):
-    try:
-        uri_list = ["{}{}?", "token={}&", "order={}&", "start={}&", "limit={}&", "select={}&"]
-        with_template = ""
-        uri = "".join(uri_list)
-    except Exception as e:
-        logger_recorder.error('make_url: {}'.format(e))
-        pass
-    else:
-        if kwargs['_with_operation'] == 'singular':
-            uri = [uri]
-            uri.append("with={}={}")
-            uri = "".join(uri)
-            return uri.format(REST_BASIC_PATH, REST_FLOW_PATH, TOKEN, ORDER, START, LIMIT, flow_attrs, _with_attr, _single_attr_key_val)
-        elif kwargs['_with_operation'] == 'plural':
-            # default update
-            uri = uri.format(REST_BASIC_PATH, REST_FLOW_PATH, TOKEN, ORDER, START, LIMIT, flow_attrs)
-            uri = [uri]
-            uri.append("with={}={}")
-            uri = "".join(uri)
-            # first update
-            for i, _attr in enumerate(_with_attr):
-                for j, arg in enumerate(args[0]):
-                    if i == 0 and j == 0:
-                        uri =  uri.format(_attr, arg)
-            # rest of args and _with_attr update
-            for i, _attr in enumerate(_with_attr):
-                for j, arg in enumerate(args[0]):
-                    if i != 0 and j != 0:
-                        if i==j:
-                            with_template = ""
-                            with_template = with_template + "," + "{}={}"  ## ,{}{}
-                            uri = [uri]
-                            uri.append(with_template)
-                            uri = "".join(uri)
-                            uri = uri.format(_attr, arg)
-            return uri
-        else:
-            return uri.format(REST_BASIC_PATH, REST_FLOW_PATH, TOKEN, ORDER, START, LIMIT, flow_attrs)
-
-def get_rest_url(_single_attr_key_val, flow_attrs, _with_attr, *args, **kwargs):
-        url = make_url(_single_attr_key_val, flow_attrs, _with_attr, *args, **kwargs)
-        return url
-
+def get_rest_url(ip, flow_attrs, _with_attr):
+    return "{}{}?token={}&order={}&start={}&limit={}&select={}&with={}={}".format(
+        REST_BASIC_PATH, REST_FLOW_PATH, TOKEN, ORDER, START, LIMIT, flow_attrs, _with_attr, ip)
 
 def get_flows(rest_flow_url):
     api_start = time.time()
@@ -238,11 +161,9 @@ def get_flows(rest_flow_url):
         parsed_rest_url = urlparse(rest_flow_url)
         coll_flows = api.rest.get(rest_flow_url)['collection']
         parsed_qs = parse_qs(parsed_rest_url.query)
-        with_attr = parsed_qs['with'][0].split('=')[0]
-        with_attr_val = parsed_qs['with'][0].split('=')[1]
+        ip = parsed_qs['with'][0].split('=')[1]
         # logger_recorder.info('api elapsed: {}'.format(time.time() - api_start))
-        logger_recorder.info('collection count of {0} {1} : {2}, it takes {3:.2f} seconds'.format(
-            with_attr, with_attr_val, len(coll_flows), time.time() - api_start))
+        logger_recorder.info('collection count of {0} : {1}, it takes {2:.2f} seconds'.format(ip, len(coll_flows), time.time() - api_start))
         # for_start = time.time()
     except Exception as e:
         logger_recorder.error('get_flows: {}'.format(e))
@@ -276,7 +197,7 @@ def write_flows(coll_flows):
         parsed_qs = coll_flows['parsed_qs']
         _with = parsed_qs['with'][0].split('=')[0]
         ip = parsed_qs['with'][0].split('=')[1]
-        flow_csv_filepath = path_day + FLOW_CSV_FILENAME.format(today.tm_year, today.tm_mon, today.tm_mday, parsed_qs['with'][0].replace("=","_"))
+        flow_csv_filepath = path_day + FLOW_CSV_FILENAME.format(today.tm_year, today.tm_mon, today.tm_mday, _with, ip)
     except Exception as e:
         logger_recorder.error('write_flows: {}'.format(e))
         pass
@@ -286,24 +207,18 @@ def write_flows(coll_flows):
                 writer = csv.DictWriter(f, fieldnames=FIELD_NAMES)
                 writer.writeheader()
                 for flow in flows:
-                    if re.search('host', str(flow[_with])):
-                        if str(flow[_with]) in include_subnet_tree:
-                            writer.writerow(flow)
-                    else:
+                    if str(flow[_with]) in include_subnet_tree:
                         writer.writerow(flow)
                     # if str(flow['source_host']) in include_subnet_tree:
                     #     writer.writerow(flow)
             logger_recorder.info('{0} Flows are updated to {1}, it takes {2:.2f} seconds'.format(
                 count_of_flows, flow_csv_filepath, time.time() - writer_start))
-            # print_line()
+            print_line()
         else:
             with open(flow_csv_filepath, 'a') as f:
                 writer = csv.DictWriter(f, fieldnames=FIELD_NAMES)
                 for flow in flows:
-                    if re.search('host', str(flow[_with])):
-                        if str(flow[_with]) in include_subnet_tree:
-                            writer.writerow(flow)
-                    else:
+                    if str(flow[_with]) in include_subnet_tree:
                         writer.writerow(flow)
                     # if str(flow['source_host']) in include_subnet_tree:
                     #     writer.writerow(flow)
@@ -325,7 +240,7 @@ def get_and_wirte_flows():
     api_start = time.time()
     api = saisei_api(server=SERVER, port=PORT, user=USER, password=PASSWORD)
     flow_attrs = ','.join([str(attr) for attr in FLOW_ATTR])
-    for ip in INCLUDE_IP:
+    for ip in INCLUDE:
         rest_flow_url = "{}{}?token={}&order={}&start={}&limit={}&select={}&with={}={}".format(
             REST_BASIC_PATH, REST_FLOW_PATH, TOKEN, ORDER, START, LIMIT, flow_attrs, WITH_ATTR, ip)
         coll_flows = api.rest.get(rest_flow_url)['collection']
@@ -357,10 +272,8 @@ def get_and_wirte_flows():
         logger_recorder.info('writer elapsed: {}'.format(time.time() - writer_start))
         print_line()
 
-
-logger_recorder = None
 try:
-    if re.search('flow_recorder', sys.argv[0]):
+    if re.search('flow_recorder.py', sys.argv[0]):
         make_logger()
 except Exception as e:
     pass
@@ -368,7 +281,7 @@ except Exception as e:
 
 try:
     include_subnet_tree = SubnetTree()
-    for subnet in INCLUDE_IP:
+    for subnet in INCLUDE:
         include_subnet_tree[subnet] = str(subnet)
 except Exception as e:
     logger_recorder.error('subnetTree: {}'.format(e))
@@ -387,87 +300,40 @@ def main():
         queue = Queue()
         out_queue = Queue()
         flow_attrs = ','.join([str(attr) for attr in FLOW_ATTR])
-        total_count = 0
     except Exception as e:
         logger_recorder.error('queue: {}'.format(e))
         sys.exit()
     else:
         while True:
-            logger_recorder.info('Getting Started Collecting...')
-            logger_recorder.info('Index : Filter')
-            for with_operation in WITH_OPERATION:
-                for _single_attrs in with_operation['singular']:
-                    for _single_attr_key in _single_attrs.keys():
-                        for idx, _single_attr_key_val in enumerate(_single_attrs[_single_attr_key]):
-                            total_count += 1
-                            logger_recorder.info('{} : {}'.format(total_count, _single_attr_key_val))
-                            rest_flow_url = get_rest_url(_single_attr_key_val,
-                                                         flow_attrs,
-                                                         _single_attr_key,
-                                                         _with_operation='singular',
-                                                         _plural_len=0)
-                            queue.put(rest_flow_url)
-                if USE_PLURAL_FILTER:
-                    for _plural in with_operation['plural']:
-                        for _plural_attrs in _plural:
-                            plural_len = len(_plural_attrs.keys())
-                            total_attrs = []
-                            # make attr value
-                            for _key in _plural_attrs.keys():
-                                _attr = []
-                                for val in _plural_attrs[_key]:
-                                    _attr.append(val)
-                                total_attrs.append(_attr)
-                            # start collecting
-                            for i, _total_attr in enumerate(list(product(*total_attrs))):
-                                total_count += 1
-                                logger_recorder.info('{} : {}'.format(
-                                    total_count,
-                                    '_'.join(_total_attr))
-                                )
-                                rest_flow_url = get_rest_url('none',
-                                                             flow_attrs,
-                                                             _plural_attrs.keys(),
-                                                             _total_attr,
-                                                             _with_operation="plural",
-                                                             _plural_len=plural_len)
-                                queue.put(rest_flow_url)
-                            # for i, _plural_attr_first_key_val in enumerate(_plural_attrs[_plural_attrs.keys()[0]]):
-                            #     for j, _plural_attr_second_key_val in enumerate(_plural_attrs[_plural_attrs.keys()[1]]):
-                            #         total_count += 1
-                            #         logger_recorder.info('{} : {}_{} {}_{}'.format(
-                            #             total_count,
-                            #             _plural_attrs.keys()[0],
-                            #             _plural_attr_first_key_val,
-                            #             _plural_attrs.keys()[1],
-                            #             _plural_attr_second_key_val)
-                            #         )
-                            #         rest_flow_url = get_rest_url(_plural_attr_first_key_val,
-                            #                                      flow_attrs,
-                            #                                      _plural_attrs.keys(),
-                            #                                      _plural_attr_second_key_val,
-                            #                                      _with_operation="plural",
-                            #                                      _plural_len=plural_len)
-                            #         queue.put(rest_flow_url)
-            logger_recorder.info('Total Count : {}'.format(total_count))
-            print_line()
-
-            for i in range(total_count):
+            for i in range(len(INCLUDE)):
                 tra = ThreadRestApi(queue, out_queue)
                 tra.daemon = True
                 tra.start()
 
-            for i in range(total_count):
+            logger_recorder.info('Getting Started Collecting...')
+            for idx, ip in enumerate(INCLUDE):
+                logger_recorder.info('{} : {}'.format(idx, ip))
+                for _with_attr in WITH_ATTR:
+                    rest_flow_url = get_rest_url(ip, flow_attrs, _with_attr)
+                    queue.put(rest_flow_url)
+            print_line()
+
+            for i in range(len(INCLUDE)):
                 tw = ThreadWriter(out_queue)
                 tw.daemon = True
                 tw.start()
 
             queue.join()
             out_queue.join()
-
+            # threads = []
+            # t = threading.Thread(target=get_and_wirte_flows())
+            # threads.append(t)
+            # for t in threads:
+            #     t.start()
+            # for t in threads:
+            #     t.join()
             sleep_start = time.time()
             time.sleep(10)
-            total_count = 0
             logger_recorder.info('sleep elapsed: {0:.2f}'.format(time.time() - sleep_start))
             print_line()
 
@@ -478,3 +344,14 @@ if __name__ == "__main__":
         print ("\r\nThe script is terminated by user interrupt!")
         print ("Bye!!")
         sys.exit()
+
+# plogger_recorder.info(coll_flows)
+
+# def type_checker(key, data):
+#     if isinstance(data, dict):
+#         data[]
+#     if isinstance(data, unicode):
+#         if data is 'name':
+#             return data
+#         else:
+#             return 'none'
