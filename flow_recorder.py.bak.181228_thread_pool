@@ -1,5 +1,6 @@
 #!/usr/bin/python2.7
 # -*- coding: utf-8 -*-
+# Copyright (C) 2016 Saisei Networks Inc. All rights reserved.
 
 from saisei.saisei_api import saisei_api
 from SubnetTree import SubnetTree
@@ -69,7 +70,7 @@ PORT = '5000'
 REST_BASIC_PATH ='configurations/running/'
 REST_FLOW_PATH = 'flows/'
 FLOW_CSV_FILENAME = '{}{}{}_{}_flows.log' # year, mon, day, {with}, ip
-RECORDER_LOG_FILENAME = r'/var/log/flows/flow_recorder8.0.log'
+RECORDER_LOG_FILENAME = r'/var/log/flow_recorder8.0.log'
 FLOW_PATH = '/var/log/flows/'
 TOKEN = '1'
 ORDER = '<average_rate' # <: Descending, >: Ascending
@@ -156,7 +157,7 @@ class ThreadPool(object):
             # else:
             #     logger_recorder.info('NO active threads')
 
-## not used now.
+
 class ThreadRestApi(Thread):
     """Threaded Rest Call"""
     def __init__(self, queue, out_queue):
